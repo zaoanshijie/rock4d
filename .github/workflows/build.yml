@@ -33,7 +33,7 @@ concurrency:
 jobs:
   resolve:
     name: "Resolve build targets"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       should_build: ${{ steps.decide.outputs.should_build }}
@@ -124,7 +124,12 @@ jobs:
     name: "Build ${{ matrix.edition }} image (${{ matrix.kind }} ${{ matrix.tag }})"
     needs: resolve
     if: needs.resolve.outputs.should_build != '0'
-    runs-on: ubuntu-latest
+    # Pinned runner image: `ubuntu-latest` began migrating to Ubuntu 26 on
+    # 2026-10-19 (actions/runner-images#14748). The new image leaves less free
+    # space on / and the image-ng build died with "No space left on device".
+    # Stay on the 24.04 image that the previous successful builds used; move to
+    # a newer image only after verifying the build still fits on its disk.
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
       fail-fast: false
@@ -400,7 +405,7 @@ jobs:
     name: "Report build failure"
     needs: [resolve, build, release]
     if: ${{ always() && contains(needs.*.result, 'failure') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: "Collect failed step logs"
@@ -472,7 +477,7 @@ jobs:
     # Run even when some matrix legs failed, so that successful targets are still
     # released (per-target artifacts are checked below; targets without artifacts are skipped).
     if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.should_build != '0' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       GH_TOKEN: ${{ github.token }}
