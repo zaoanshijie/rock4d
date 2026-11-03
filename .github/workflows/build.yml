@@ -261,6 +261,45 @@ jobs:
           bash -n src/libexec/rsdk/rsdk-build
           bash -n src/libexec/rsdk/rsdk-setup
 
+      - name: "Free disk space"
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "--- disk before cleanup ---"
+          df -h / /mnt 2>/dev/null || df -h /
+
+          # The image-ng build peaks with rootfs.tar (uncompressed rootfs),
+          # the uncompressed .img, the downloaded .debs and the docker/nix
+          # layers all on the root filesystem. GitHub-hosted runners only ship
+          # ~14 GB free, and runners already migrated to the newer
+          # ubuntu-latest image have noticeably less - which is exactly how the
+          # cli leg died with "No space left on device" (the runner itself
+          # crashed while writing its own diagnostic log).
+          # Remove the preinstalled toolchains this workflow never uses.
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            /usr/lib/jvm \
+            /opt/microsoft \
+            /usr/local/aws-cli \
+            /usr/local/aws-sam-cli || true
+          sudo apt-get clean || true
+          docker image prune -af >/dev/null 2>&1 || true
+          docker builder prune -af >/dev/null 2>&1 || true
+          sudo rm -rf /swapfile /mnt/swapfile 2>/dev/null || true
+
+          echo "--- disk after cleanup ---"
+          df -h / /mnt 2>/dev/null || df -h /
+          AVAIL_KB=$(df -Pk / | awk 'NR==2{print $4}')
+          echo "available on /: $((AVAIL_KB / 1024 / 1024)) GiB"
+          if [[ "$AVAIL_KB" -lt 10485760 ]]; then
+            echo "FATAL: less than 10 GiB free on / even after cleanup; the image build cannot fit."
+            exit 1
+          fi
+
       - name: "Enable KVM group perms"
         shell: bash
         run: |
@@ -283,20 +322,35 @@ jobs:
           push: never
           runCmd: |
             set -euo pipefail
+            echo "--- disk before build (inside devcontainer) ---"
+            df -h / || true
             src/bin/rsdk setup
             attempt=1
             while true; do
               if src/bin/rsdk shell rsdk build --test-repo --sector-size 512 --image-name output_512.img radxa-rk3576 bookworm ${{ matrix.edition }}; then
                 break
               fi
+              echo "--- disk after failed build attempt $attempt ---"
+              df -h / || true
               if [ "$attempt" -ge 2 ]; then
                 echo "=== rsdk build still failing after $attempt attempts, giving up ==="
+                exit 1
+              fi
+              # A full disk is not transient - retrying just burns another run and
+              # fails the same way (this is what happened to the cli leg). Bail out
+              # immediately with a clear message instead.
+              AVAIL_KB=$(df -Pk / | awk 'NR==2{print $4}')
+              if [ "${AVAIL_KB:-0}" -lt 2097152 ]; then
+                echo "=== only $((AVAIL_KB / 1024)) MiB left on / - out of disk space, not retrying ==="
+                du -xh --max-depth=2 out /tmp 2>/dev/null | sort -h | tail -20 || true
                 exit 1
               fi
               echo "=== rsdk build attempt $attempt failed (transient upstream apt errors are common); retrying in 120s ==="
               attempt=$((attempt + 1))
               sleep 120
             done
+            echo "--- disk after build ---"
+            df -h / || true
 
       - name: "Verify SSH is enabled in the image"
         shell: bash
